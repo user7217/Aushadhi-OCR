@@ -1,8 +1,10 @@
 import re
+import unicodedata
 from typing import List
 import pandas as pd
 from rapidfuzz import fuzz, process
 from pydantic import BaseModel
+from rapidfuzz.distance import Levenshtein
 
 class Match(BaseModel):
     name: str
@@ -11,67 +13,102 @@ class Match(BaseModel):
     generic: str | None = None
     manufacturer: str | None = None
 
+UNIT_MAP = {
+    "microgram": "mcg",
+    "µg": "mcg",
+    "μg": "mcg",
+    "milligram": "mg",
+    "grams": "g",
+    "milliliter": "ml",
+    "mls": "ml",
+    "iu": "iu",
+    "%": "%",
+}
+
+def strip_accents(s: str) -> str:
+    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+
+def standardize_units(s: str) -> str:
+    t = s
+    for k, v in UNIT_MAP.items():
+        t = t.replace(k, v)
+    return t
+
 def normalize_text(s: str) -> str:
-    s = s.lower()
+    s = (s or "").lower()
+    s = strip_accents(s)
     s = s.replace("-", " ")
-    s = re.sub(r"[^a-z0-9\s+/;,+]", " ", s)  # keep + / ; , to split strength aliases
+    s = standardize_units(s)
+    # keep + / ; , % for splitting and dosage parsing
+    s = re.sub(r"[^a-z0-9\s+/;,+%]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
 def _scorer(a: str, b: str, **kwargs) -> float:
-    s1 = fuzz.token_set_ratio(a, b)
-    s2 = fuzz.partial_ratio(a, b)
-    return 0.6 * s1 + 0.4 * s2
+    # Stable blend proven effective on mixed OCR
+    ts = fuzz.token_set_ratio(a, b)
+    pr = fuzz.partial_ratio(a, b)
+    return 0.6 * ts + 0.4 * pr
+
+def _row_candidates(row) -> list[str]:
+    product_name = normalize_text(getattr(row, "product_name", "") or "")
+    strength_raw = getattr(row, "strength", "") or ""
+    aliases = [normalize_text(p) for p in re.split(r"[;,+]", strength_raw) if p and p.strip()]
+    seen = set()
+    out = []
+    for t in aliases + [product_name]:
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out if out else [product_name]
 
 def fuzzy_topk(query: str, df: pd.DataFrame, k: int = 5) -> List[Match]:
-    query = normalize_text(query)
-    candidates = []  # (candidate_str, row_index, product_name)
+    q = normalize_text(query)
+    candidates: list[tuple[str, int, str]] = []
     for idx, row in enumerate(df.itertuples()):
-        product_name = row.product_name or ""
-        strength = row.strength or ""
-        aliases = re.split(r"[;,+]", strength)  # split embedded aliases
-        aliases = [normalize_text(a) for a in aliases if a.strip()]
-        product_norm = normalize_text(product_name)
-        for alias in aliases + [product_norm]:
-            candidates.append((alias, idx, product_name))
-
+        cands = _row_candidates(row)
+        pname = getattr(row, "product_name", "") or ""
+        for c in cands:
+            candidates.append((c, idx, pname))
+    if not candidates:
+        return []
     names = [c[0] for c in candidates]
-    matches = process.extract(query, names, scorer=_scorer, limit=k*3)
+    matches = process.extract(q, names, scorer=_scorer, limit=max(k * 3, 15))
 
-    best_per_row = {}
-    for matched, score, pos in matches:
-        idx = candidates[pos][1]
-        base_name = candidates[pos][2]
-        if idx not in best_per_row or best_per_row[idx]["score"] < score:
-            best_per_row[idx] = {"score": score, "name": base_name, "row_index": idx}
+    best_per_row: dict[int, dict] = {}
+    for _, score, pos in matches:
+        row_idx = candidates[pos][1]
+        pname = candidates[pos][2]
+        sc = float(score)
+        if row_idx not in best_per_row or sc > best_per_row[row_idx]["score"]:
+            best_per_row[row_idx] = {"score": sc, "name": pname, "row_index": row_idx}
 
-    best_list = sorted(best_per_row.values(), key=lambda x: x["score"], reverse=True)[:k]
+    ranked = sorted(best_per_row.values(), key=lambda x: x["score"], reverse=True)[:k]
 
     out: List[Match] = []
-    for best in best_list:
-        row = df.iloc[best["row_index"]]
+    for item in ranked:
+        i = item["row_index"]
+        row = df.iloc[i]
         out.append(Match(
-            name=best["name"],
-            score=float(best["score"]),
-            row_index=best["row_index"],
-            generic=row.get("strength"),
-            manufacturer=row.get("manufacturer")
+            name=item["name"],
+            score=item["score"],
+            row_index=int(i),
+            generic=str(row.get("strength", "")),
+            manufacturer=str(row.get("manufacturer", "")) if "manufacturer" in row else None
         ))
     return out
 
-def suspicious_tweaks(query: str, best_name: str, best_score: float) -> List[str]:
-    from rapidfuzz.distance import Levenshtein
-    flags: List[str] = []
+def suspicious_tweaks(query: str, best_name: str, best_score: float) -> list[str]:
+    flags: list[str] = []
     if best_score < 75:
         flags.append(f"Low similarity score {best_score:.1f}")
-    q = query.replace(" ", "")
-    b = best_name.replace(" ", "")
+    q = (query or "").replace(" ", "")
+    b = (best_name or "").replace(" ", "")
     if q and b:
         ed = Levenshtein.distance(q, b)
         if 1 <= ed <= 2 and best_score < 92:
             flags.append(f"Minor edit distance {ed} to a known brand")
-        swaps = [("0","o"),("o","0"),("1","l"),("l","1"),("i","l"),("rn","m")]
-        for a, c in swaps:
+        for a, c in [("0","o"),("o","0"),("1","l"),("l","1"),("i","l"),("rn","m")]:
             if a in q and q.replace(a, c) == b:
                 flags.append(f"Character substitution pattern {a}->{c}")
                 break

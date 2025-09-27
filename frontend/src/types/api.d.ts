@@ -2,11 +2,11 @@ export interface Match {
   name: string;
   score: number;
   row_index: number;
-  generic?: string;        // strength from CSV
+  generic?: string;       // strength
   manufacturer?: string;
-  form?: string;           // add this
+  form?: string;
   alias_name?: string;
-  main_uses?: string;      // add this
+  main_uses?: string;
 }
 
 export interface InferResp {
@@ -14,5 +14,7 @@ export interface InferResp {
   top_k: Match[];
   mismatch_flag: boolean;
   flags: string[];
-  main_uses?: string;      // top match’s uses (convenience)
+  main_uses?: string;     // best match convenience
+  edit_distance?: number; // new
+  vision_score?: number;  // new 0-100
 }
