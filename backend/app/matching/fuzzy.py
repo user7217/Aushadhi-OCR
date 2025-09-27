@@ -14,7 +14,7 @@ class Match(BaseModel):
 def normalize_text(s: str) -> str:
     s = s.lower()
     s = s.replace("-", " ")
-    s = re.sub(r"[^a-z0-9\s+/;,+]", " ", s)  # keep + / ; , for splits
+    s = re.sub(r"[^a-z0-9\s+/;,+]", " ", s)  # keep + / ; , to split strength aliases
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -25,33 +25,29 @@ def _scorer(a: str, b: str, **kwargs) -> float:
 
 def fuzzy_topk(query: str, df: pd.DataFrame, k: int = 5) -> List[Match]:
     query = normalize_text(query)
-    candidates = []  # tuples (candidate_str, row_index, base_name)
+    candidates = []  # (candidate_str, row_index, product_name)
     for idx, row in enumerate(df.itertuples()):
-        product = row.product_name or ""
+        product_name = row.product_name or ""
         strength = row.strength or ""
-        # Split strength into aliases by delimiters ; + ,
-        aliases = re.split(r"[;,+]", strength)
+        aliases = re.split(r"[;,+]", strength)  # split embedded aliases
         aliases = [normalize_text(a) for a in aliases if a.strip()]
-        # Include product_name (normalized) as well
-        product_norm = normalize_text(product)
-        # Candidate aliases + product_name - each linked to row idx and product base name
+        product_norm = normalize_text(product_name)
         for alias in aliases + [product_norm]:
-            candidates.append((alias, idx, product))
-    # Extract top matches by scoring against all aliases + product_name
-    # process.extract returns list of (match_str, score, index) with index into candidates
+            candidates.append((alias, idx, product_name))
+
     names = [c[0] for c in candidates]
     matches = process.extract(query, names, scorer=_scorer, limit=k*3)
-    # Aggregate best by row_index, keep best score per uniq row to pick top-k rows
+
     best_per_row = {}
-    for match_str, score, pos in matches:
+    for matched, score, pos in matches:
         idx = candidates[pos][1]
         base_name = candidates[pos][2]
         if idx not in best_per_row or best_per_row[idx]["score"] < score:
             best_per_row[idx] = {"score": score, "name": base_name, "row_index": idx}
-    # Sort aggregated best matches descending by score
+
     best_list = sorted(best_per_row.values(), key=lambda x: x["score"], reverse=True)[:k]
 
-    out = []
+    out: List[Match] = []
     for best in best_list:
         row = df.iloc[best["row_index"]]
         out.append(Match(

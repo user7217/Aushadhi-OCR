@@ -1,8 +1,6 @@
 import { useState, useCallback, useMemo } from "react";
-import { Dropzone } from "./components/Dropzone";
 import { infer } from "./lib/api";
-import { downscale } from "./lib/image";
-import type { InferResp } from "./types/api";
+import type { InferResp, Match } from "./types/api";
 
 export default function App() {
   const [preview, setPreview] = useState<string | null>(null);
@@ -10,19 +8,17 @@ export default function App() {
   const [resp, setResp] = useState<InferResp | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const onDrop = useCallback(async (files: File[]) => {
+  const onFileChange = useCallback(async (ev: React.ChangeEvent<HTMLInputElement>) => {
     setError(null);
     setResp(null);
-    if (!files.length) return;
-    const file = files[0];
+    const file = ev.target.files?.[0];
+    if (!file) return;
     setLoading(true);
     try {
-      const blob = await downscale(file, 1280);
-      const previewUrl = URL.createObjectURL(blob);
-      setPreview(previewUrl);
-      const named = new File([blob], file.name.replace(/\.\w+$/, ".jpg"), { type: "image/jpeg" });
-      const data = await infer(named, { top_k: 5, threshold: 85, ocr_backend: "roboflow" });
+      const data = await infer(file, { top_k: 5, threshold: 85, ocr_backend: "roboflow" });
       setResp(data);
+      const url = URL.createObjectURL(file);
+      setPreview(url);
     } catch (e: any) {
       setError(e?.message || "Upload failed");
     } finally {
@@ -32,16 +28,18 @@ export default function App() {
 
   const status = useMemo(() => {
     if (loading) return "Analyzing…";
-    if (error) return `Error: ${error}`; // fixed: proper template literal
-    if (!resp) return "Drop a medicine box photo";
+    if (error) return `Error: ${error}`;
+    if (!resp) return "Upload a medicine image to begin";
     return resp.mismatch_flag ? "Potential mismatch" : "Likely valid";
   }, [loading, error, resp]);
+
+  const top: Match | undefined = resp?.top_k?.[0];
 
   return (
     <div style={{ maxWidth: 920, margin: "0 auto", fontFamily: "Inter, system-ui" }}>
       <h2>Aushadhi‑OCR</h2>
 
-      <Dropzone onDrop={onDrop} />
+      <input type="file" accept="image/*" onChange={onFileChange} />
 
       {preview && (
         <div style={{ marginTop: 16 }}>
@@ -56,19 +54,21 @@ export default function App() {
       {resp && (
         <div style={{ marginTop: 16 }}>
           <div><strong>OCR:</strong> {resp.ocr_text || "(none)"} </div>
-          {resp.flags.length > 0 && (
-            <div style={{ color: "#b10" }}>
-              Flags: {resp.flags.join(" • ")}
+
+          {top && (
+            <div style={{ marginTop: 12, padding: 12, border: "1px solid #ddd", borderRadius: 8 }}>
+              <div style={{ fontSize: 18, fontWeight: 600 }}>{top.name}</div>
+              {top.generic && <div style={{ color: "#555", marginTop: 4 }}>Strength: {top.generic}</div>}
+              {top.form && <div style={{ color: "#555", marginTop: 4 }}>Form: {top.form}</div>}
+              {top.manufacturer && <div style={{ color: "#555", marginTop: 4 }}>Manufacturer: {top.manufacturer}</div>}
+              <div style={{ marginTop: 8 }}>
+                <strong>Uses:</strong> {resp.main_uses || top.main_uses || "(Not available)"}
+              </div>
+              <div style={{ marginTop: 8, color: "#777" }}>
+                Match score: {top.score.toFixed(1)}%
+              </div>
             </div>
           )}
-          <h4>Top candidates</h4>
-          <ul>
-            {resp.top_k.map((m, i) => (
-              <li key={i}>
-                {m.name} — {m.score.toFixed(1)}% {m.generic ? `— ${m.generic}` : ""} {m.manufacturer ? `— ${m.manufacturer}` : ""}
-              </li>
-            ))}
-          </ul>
         </div>
       )}
     </div>
