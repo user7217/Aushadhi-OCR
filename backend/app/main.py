@@ -29,11 +29,9 @@ DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 MEDS_CSV = os.path.join(DATA_DIR, "meds.csv")
 if not os.path.exists(MEDS_CSV):
     os.makedirs(DATA_DIR, exist_ok=True)
-    # Optional: seed with minimal if needed
     with open(MEDS_CSV, "w") as f:
         f.write("product_name,strength,manufacturer,form,alias_name,main_uses\n")
 MEDS_DF = pd.read_csv(MEDS_CSV, dtype=str).fillna("")
-CANDIDATES = []  # We will build this in fuzzy_topk
 
 @app.post("/api/infer", response_model=InferenceResponse)
 async def infer(
@@ -66,7 +64,7 @@ async def infer(
             generic=MEDS_DF.iloc[m.row_index].get("strength", ""),
             manufacturer=MEDS_DF.iloc[m.row_index].get("manufacturer", ""),
             form=MEDS_DF.iloc[m.row_index].get("form", ""),
-            alias_name=MEDS_DF.iloc[m.row_index].get("alias_name", ""),
+            alias_name="",  # aliases parsed internally in fuzzy_topk
             main_uses=MEDS_DF.iloc[m.row_index].get("main_uses", ""),
         ) for m in topk_fuzzy
     ]
